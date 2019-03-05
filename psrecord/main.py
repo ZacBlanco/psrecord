@@ -30,18 +30,32 @@ import time
 import argparse
 
 
-def get_percent(process):
+def get_percent(process, system=False):
+    import psutil
     try:
-        return process.cpu_percent()
+        if not system:
+            return process.cpu_percent()
+        else:
+            return psutil.cpu_percent()
     except AttributeError:
-        return process.get_cpu_percent()
+        if not system:
+            return process.get_cpu_percent()
+        else:
+            return psutil.get_cpu_percent()
 
 
-def get_memory(process):
+def get_memory(process, system=False):
+    import psutil
     try:
-        return process.memory_info()
-    except AttributeError:
-        return process.get_memory_info()
+        if not system:
+            return process.memory_info()
+        else:
+            return psutil.virtual_memory()
+    except AttributeError as e:
+        if not system:
+            return process.get_memory_info()
+        else:
+            return psutil.get_virtual_memory() 
 
 
 def all_children(pr):
@@ -91,24 +105,28 @@ def main():
 
     args = parser.parse_args()
 
-    # Attach to process
-    try:
-        pid = int(args.process_id_or_command)
-        print("Attaching to process {0}".format(pid))
-        sprocess = None
-    except Exception:
-        import subprocess
-        command = args.process_id_or_command
-        print("Starting up command '{0}' and attaching to process"
-              .format(command))
-        sprocess = subprocess.Popen(command, shell=True)
-        pid = sprocess.pid
+    if args.process_id_or_command != "system":
+        # Attach to process
+        try:
+            pid = int(args.process_id_or_command)
+            print("Attaching to process {0}".format(pid))
+            sprocess = None
+        except Exception:
+            import subprocess
+            command = args.process_id_or_command
+            print("Starting up command '{0}' and attaching to process"
+                .format(command))
+            sprocess = subprocess.Popen(command, shell=True)
+            pid = sprocess.pid
 
-    monitor(pid, logfile=args.log, plot=args.plot, duration=args.duration,
-            interval=args.interval, include_children=args.include_children)
+        monitor(pid, logfile=args.log, plot=args.plot, duration=args.duration,
+                interval=args.interval, include_children=args.include_children)
+        if sprocess is not None:
+            sprocess.kill()
+    else:
+        monitor(-1, logfile=args.log, plot=args.plot, duration=args.duration,
+                interval=args.interval, include_children=args.include_children)
 
-    if sprocess is not None:
-        sprocess.kill()
 
 
 def monitor(pid, logfile=None, plot=None, duration=None, interval=None,
@@ -118,7 +136,13 @@ def monitor(pid, logfile=None, plot=None, duration=None, interval=None,
     # is not present (for example if accessing the version)
     import psutil
 
-    pr = psutil.Process(pid)
+    system = False
+    if pid == -1:
+        system = True
+
+    pr = None
+    if not system:
+        pr = psutil.Process(pid)
 
     # Record start time
     start_time = time.time()
@@ -146,18 +170,19 @@ def monitor(pid, logfile=None, plot=None, duration=None, interval=None,
             # Find current time
             current_time = time.time()
 
-            try:
-                pr_status = pr.status()
-            except TypeError:  # psutil < 2.0
-                pr_status = pr.status
-            except psutil.NoSuchProcess:  # pragma: no cover
-                break
+            if not system:
+                try:
+                    pr_status = pr.status()
+                except TypeError:  # psutil < 2.0
+                    pr_status = pr.status
+                except psutil.NoSuchProcess:  # pragma: no cover
+                    break
 
-            # Check if process status indicates we should exit
-            if pr_status in [psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD]:
-                print("Process finished ({0:.2f} seconds)"
-                      .format(current_time - start_time))
-                break
+                # Check if process status indicates we should exit
+                if pr_status in [psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD]:
+                    print("Process finished ({0:.2f} seconds)"
+                        .format(current_time - start_time))
+                    break
 
             # Check if we have reached the maximum time
             if duration is not None and current_time - start_time > duration:
@@ -165,23 +190,31 @@ def monitor(pid, logfile=None, plot=None, duration=None, interval=None,
 
             # Get current CPU and memory
             try:
-                current_cpu = get_percent(pr)
-                current_mem = get_memory(pr)
-            except Exception:
+                current_cpu = get_percent(pr, system=system)
+                current_mem = get_memory(pr, system=system)
+            except Exception as e:
+                print(e)
                 break
-            current_mem_real = current_mem.rss / 1024. ** 2
-            current_mem_virtual = current_mem.vms / 1024. ** 2
+            if not system:
+                current_mem_real = current_mem.rss / 1024. ** 2
+                current_mem_virtual = current_mem.vms / 1024. ** 2
+            else:
+                used = current_mem.total - current_mem.available
+                # psutil doesn't provide virtual for system-wide funcitons.
+                current_mem_real = used / 1024 ** 2
+                current_mem_virtual = used / 1024 ** 2
 
-            # Get information for children
-            if include_children:
-                for child in all_children(pr):
-                    try:
-                        current_cpu += get_percent(child)
-                        current_mem = get_memory(child)
-                    except Exception:
-                        continue
-                    current_mem_real += current_mem.rss / 1024. ** 2
-                    current_mem_virtual += current_mem.vms / 1024. ** 2
+            if not system:
+                # Get information for children
+                if include_children:
+                    for child in all_children(pr):
+                        try:
+                            current_cpu += get_percent(child)
+                            current_mem = get_memory(child)
+                        except Exception:
+                            continue
+                        current_mem_real += current_mem.rss / 1024. ** 2
+                        current_mem_virtual += current_mem.vms / 1024. ** 2
 
             if logfile:
                 f.write("{0:12.3f} {1:12.3f} {2:12.3f} {3:12.3f}\n".format(
